@@ -8,6 +8,12 @@ import (
 	"bytes"
 	"encoding/hex"
 	"testing"
+	"github.com/minio/blake2b-simd"
+	"sort"
+	"time"
+	"fmt"
+	"math/big"
+	"math/rand"
 )
 
 func fromHex(s string) []byte {
@@ -97,7 +103,7 @@ func TestWriteAfterSum(t *testing.T) {
 	}
 }
 
-func TestWrite(t *testing.T) {
+func testWrite(t *testing.T, size int) {
 	var key [32]byte
 	for i := range key {
 		key[i] = byte(i)
@@ -106,7 +112,7 @@ func TestWrite(t *testing.T) {
 	h := New(key)
 
 	var msg1 []byte
-	msg0 := make([]byte, 64)
+	msg0 := make([]byte, size)
 	for i := range msg0 {
 		h.Write(msg0[:i])
 		msg1 = append(msg1, msg0[:i]...)
@@ -119,6 +125,133 @@ func TestWrite(t *testing.T) {
 		t.Fatalf("Sum differ from poly1305.Sum\n Sum: %s \n poly1305.Sum: %s", hex.EncodeToString(tag0[:]), hex.EncodeToString(tag1[:]))
 	}
 }
+
+func TestWrite(t *testing.T) {
+
+	for size := 0; size < 128; size++ {
+		testWrite(t, size)
+	}
+}
+
+func mask(b, m int) byte {
+	s := uint(9 - m)
+	return byte(((1 << s)-1) << uint(b % m))
+}
+
+func Blake2bSum(buf []byte) []byte {
+	h := blake2b.New512()
+	h.Reset()
+	h.Write(buf[:])
+	sum := h.Sum(nil)
+	return sum
+}
+
+func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
+
+	msg := make([]byte, 1<<shift)
+	for i := range msg {
+		msg[i] = byte(i)
+	}
+
+	var keys []string
+
+	for m := 8; m >= 1; m-- {
+		for b := 0; b < len(msg)*m; b++ {
+			// Change message with mask
+			msg[b / m] = msg[b / m] ^ mask(b, m)
+
+			tag := Sum(msg, key) // Blake2bSum(msg)
+			tagstr := hex.EncodeToString(tag[:])
+
+			keys = append(keys, tagstr)
+			// Undo change
+			msg[b / m] = msg[b / m] ^ mask(b, m)
+		}
+	}
+
+	// sanity check if message not corrupted
+	for i := range msg {
+		if msg[i] != byte(i) {
+			panic("memory corrupted")
+		}
+	}
+
+	sort.Strings(keys)
+
+	var tagprev *big.Int
+	var smallest *big.Int
+
+	for i, k := range keys {
+
+		tag := new(big.Int)
+		tag.SetString(k, 16)
+
+		if i > 0 {
+			diff := new(big.Int)
+			diff.Sub(tag, tagprev)
+			//fmt.Println(k, diff)
+
+			if smallest == nil {
+				smallest = new(big.Int)
+				*smallest = *diff
+			} else if smallest.Cmp(diff) > 0 {
+				*smallest = *diff
+			}
+		}
+
+		tagprev = tag
+	}
+
+	fmt.Println(smallest)
+	fmt.Printf("Permutations: %d -- equal bits: %d\n", len(keys), 4*len(keys[1])-len(smallest.Text(2)))
+}
+
+func TestQuality(t *testing.T) {
+
+	rand.Seed(time.Now().UTC().UnixNano())
+
+	var key [32]byte
+	for i := range key {
+		key[i] = byte(255-i) // byte(rand.Intn(256)) //
+	}
+
+
+	for shift := uint(0); shift < 10; shift++ {
+		testQuality(t, key, shift, "")
+	}
+}
+
+// XOR single bit
+// Permutations:     512  (5) -- equal bits: 17
+// Permutations:    1024  (6) -- equal bits: 19
+// Permutations:    2048  (7) -- equal bits: 22
+// Permutations:    4096  (8) -- equal bits: 23
+// Permutations:    8192  (9) -- equal bits: 26
+// Permutations:   16384 (10) -- equal bits: 29
+// Permutations:   32768 (11) -- equal bits: 29
+// Permutations:   65536 (12) -- equal bits: 30
+// Permutations:  131072 (13) -- equal bits: 34
+// Permutations:  262144 (14) -- equal bits: 36
+// Permutations:  524288 (15) -- equal bits: 37
+// Permutations: 1048576 (16) -- equal bits: 38
+// Permutations: 2097152 (17) -- equal bits: 42
+
+// XOR multiple bits
+// Permutations:     288  (2) -- equal bits: 23
+// Permutations:     576  (3) -- equal bits: 20
+// Permutations:    1152  (4) -- equal bits: 25
+// Permutations:    2304  (5) -- equal bits: 20
+// Permutations:    4608  (6) -- equal bits: 22
+// Permutations:    9216  (7) -- equal bits: 28
+// Permutations:   18432  (8) -- equal bits: 31
+// Permutations:   36864  (9) -- equal bits: 31
+// Permutations:   73728 (10) -- equal bits: 33
+// Permutations:  147456 (11) -- equal bits: 33
+// Permutations:  294912 (12) -- equal bits: 38
+// Permutations:  589824 (13) -- equal bits: 40
+// Permutations: 1179648 (14) -- equal bits: 40
+// Permutations: 2359296 (15) -- equal bits: 41
+// Permutations: 4718592 (16) -- equal bits: 45
 
 // Benchmarks
 
