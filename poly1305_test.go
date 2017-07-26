@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"testing"
 	"github.com/minio/blake2b-simd"
+	"github.com/aead/siphash"
 	"sort"
 	"time"
 	"fmt"
@@ -146,7 +147,16 @@ func Blake2bSum(buf []byte) []byte {
 	return sum
 }
 
+func SipHashSum(buf []byte, key [32]byte) []byte {
+	h, _ := siphash.New128(key[0:16])
+	h.Reset()
+	h.Write(buf[:])
+	sum := h.Sum(nil)
+	return sum
+}
+
 func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
+	start := time.Now()
 
 	msg := make([]byte, 1<<shift)
 	for i := range msg {
@@ -160,7 +170,17 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 			// Change message with mask
 			msg[b / m] = msg[b / m] ^ mask(b, m)
 
-			tag := Sum(msg, key) // Blake2bSum(msg)
+			var tag []byte
+			switch algo {
+			case "poly1305":
+				tag = make([]byte, 16)
+				t := Sum(msg, key)
+				copy(tag, t[:])
+			case "blake2b":
+				tag = Blake2bSum(msg)
+			case "siphash":
+				tag = SipHashSum(msg, key)
+			}
 			tagstr := hex.EncodeToString(tag[:])
 
 			keys = append(keys, tagstr)
@@ -202,8 +222,9 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 		tagprev = tag
 	}
 
+	elapsed := time.Since(start)
 	fmt.Println(smallest)
-	fmt.Printf("Permutations: %d -- equal bits: %d\n", len(keys), 4*len(keys[1])-len(smallest.Text(2)))
+	fmt.Printf("Permutations: %d -- equal bits: %d -- duration: %v (%s)\n", len(keys), 4*len(keys[1])-len(smallest.Text(2)), elapsed, algo)
 }
 
 func TestQuality(t *testing.T) {
@@ -215,9 +236,13 @@ func TestQuality(t *testing.T) {
 		key[i] = byte(255-i) // byte(rand.Intn(256)) //
 	}
 
+	algo := ""
+	//algo = "blake2b"
+	//algo = "poly1305"
+	algo = "siphash"
+	for shift := uint(8); shift < 14; shift++ {
 
-	for shift := uint(0); shift < 10; shift++ {
-		testQuality(t, key, shift, "")
+		testQuality(t, key, shift, algo)
 	}
 }
 
