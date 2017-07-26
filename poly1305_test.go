@@ -163,7 +163,7 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 		msg[i] = byte(i)
 	}
 
-	var keys []string
+	var keys sortBytes
 
 	for m := 8; m >= 1; m-- {
 		for b := 0; b < len(msg)*m; b++ {
@@ -181,9 +181,8 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 			case "siphash":
 				tag = SipHashSum(msg, key)
 			}
-			tagstr := hex.EncodeToString(tag[:])
 
-			keys = append(keys, tagstr)
+			keys = append(keys, tag)
 			// Undo change
 			msg[b / m] = msg[b / m] ^ mask(b, m)
 		}
@@ -196,7 +195,7 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 		}
 	}
 
-	sort.Strings(keys)
+	sort.Sort(keys)
 
 	var tagprev *big.Int
 	var smallest *big.Int
@@ -204,7 +203,7 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 	for i, k := range keys {
 
 		tag := new(big.Int)
-		tag.SetString(k, 16)
+		tag.SetBytes(k)
 
 		if i > 0 {
 			diff := new(big.Int)
@@ -224,7 +223,54 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 
 	elapsed := time.Since(start)
 	fmt.Println(smallest)
-	fmt.Printf("Permutations: %d -- equal bits: %d -- duration: %v (%s)\n", len(keys), 4*len(keys[1])-len(smallest.Text(2)), elapsed, algo)
+	fmt.Printf("Permutations: %d -- equal bits: %d -- duration: %v (%s)\n", len(keys), 8*len(keys[0])-len(smallest.Text(2)), elapsed, algo)
+}
+
+//=== RUN   TestQuality
+//331034981035233774730398058047
+//Permutations: 9216 -- equal bits: 29 -- duration: 13.718325ms (siphash)
+//1043651600146334132881589652279
+//Permutations: 18432 -- equal bits: 28 -- duration: 31.708039ms (siphash)
+//127091151576048986638674949881
+//Permutations: 36864 -- equal bits: 31 -- duration: 78.110429ms (siphash)
+//125739615007539857451722109740
+//Permutations: 73728 -- equal bits: 31 -- duration: 199.136706ms (siphash)
+//15892901921100966822695488796
+//Permutations: 147456 -- equal bits: 34 -- duration: 589.595038ms (siphash)
+//5323166014989392816270161037
+//Permutations: 294912 -- equal bits: 35 -- duration: 1.708350134s (siphash)
+//--- PASS: TestQuality (2.62s)
+
+//331034981035233774730398058047
+//Permutations: 9216 -- equal bits: 29 -- duration: 7.942226ms (siphash)
+//1043651600146334132881589652279
+//Permutations: 18432 -- equal bits: 28 -- duration: 17.967404ms (siphash)
+//127091151576048986638674949881
+//Permutations: 36864 -- equal bits: 31 -- duration: 50.091519ms (siphash)
+//125739615007539857451722109740
+//Permutations: 73728 -- equal bits: 31 -- duration: 152.070935ms (siphash)
+//15892901921100966822695488796
+//Permutations: 147456 -- equal bits: 34 -- duration: 476.633518ms (siphash)
+//5323166014989392816270161037
+//Permutations: 294912 -- equal bits: 35 -- duration: 1.666091636s (siphash)
+
+type sortBytes [][]byte
+
+func (s sortBytes) Less(i, j int) bool {
+	for index := range s[i] {
+		if s[i][index] != s[j][index] {
+			return s[i][index] < s[j][index]
+		}
+	}
+	return false
+}
+
+func (s sortBytes) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+
+func (s sortBytes) Len() int {
+	return len(s)
 }
 
 func TestQuality(t *testing.T) {
