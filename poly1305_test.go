@@ -6,15 +6,19 @@ package poly1305
 
 import (
 	"bytes"
+	"container/heap"
 	"encoding/hex"
-	"testing"
-	"github.com/minio/blake2b-simd"
-	"github.com/aead/siphash"
-	"sort"
-	"time"
 	"fmt"
+	"github.com/aead/siphash"
+	"github.com/minio/blake2b-simd"
 	"math/big"
 	"math/rand"
+	"runtime"
+	"sort"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
 )
 
 func fromHex(s string) []byte {
@@ -136,7 +140,7 @@ func TestWrite(t *testing.T) {
 
 func mask(b, m int) byte {
 	s := uint(9 - m)
-	return byte(((1 << s)-1) << uint(b % m))
+	return byte(((1 << s) - 1) << uint(b%m))
 }
 
 func Blake2bSum(buf []byte) []byte {
@@ -155,20 +159,18 @@ func SipHashSum(buf []byte, key [32]byte) []byte {
 	return sum
 }
 
-func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
-	start := time.Now()
-
-	msg := make([]byte, 1<<shift)
-	for i := range msg {
-		msg[i] = byte(i)
-	}
+func testQualitySubset(msg []byte, key [32]byte, cpu int, cpuShift uint, algo string, results chan<- sortBytes) {
 
 	var keys sortBytes
 
 	for m := 8; m >= 1; m-- {
-		for b := 0; b < len(msg)*m; b++ {
+
+		bStart := (len(msg) * m * cpu) >> cpuShift
+		bEnd := (len(msg) * m * (cpu + 1)) >> cpuShift
+
+		for b := bStart; b < bEnd; b++ {
 			// Change message with mask
-			msg[b / m] = msg[b / m] ^ mask(b, m)
+			msg[b/m] = msg[b/m] ^ mask(b, m)
 
 			var tag []byte
 			switch algo {
@@ -184,7 +186,7 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 
 			keys = append(keys, tag)
 			// Undo change
-			msg[b / m] = msg[b / m] ^ mask(b, m)
+			msg[b/m] = msg[b/m] ^ mask(b, m)
 		}
 	}
 
@@ -197,15 +199,70 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 
 	sort.Sort(keys)
 
+	results <- keys
+}
+
+func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
+	start := time.Now()
+
+	msg := make([]byte, 1<<shift)
+	for i := range msg {
+		msg[i] = byte(i)
+	}
+
+	cpus := runtime.NumCPU()
+	// make sure nr of CPUs is a power of 2
+	cpuShift := uint(len(strconv.FormatInt(int64(cpus), 2)) - 1)
+	cpus = 1 << cpuShift
+
+	var wg sync.WaitGroup
+	results := make(chan sortBytes)
+
+	for cpu := 0; cpu < cpus; cpu++ {
+
+		wg.Add(1)
+		go func(cpu int) {
+			msgCopy := make([]byte, len(msg))
+			copy(msgCopy, msg)
+			defer wg.Done()
+			testQualitySubset(msgCopy, key, cpu, cpuShift, algo, results)
+		}(cpu)
+	}
+
+	// Wait for workers to complete
+	go func() {
+		wg.Wait()
+		close(results) // Close output channel
+	}()
+
+	keys := make([]sortBytes, 0, cpus)
+
+	// Collect sub sorts
+	for r := range results {
+		keys = append(keys, r)
+	}
+
 	var tagprev *big.Int
 	var smallest *big.Int
 
-	for i, k := range keys {
+	h := &HexHeap{}
+	heap.Init(h)
+
+	// Push initial keys onto heap
+	for stack, sb := range keys {
+		if len(sb) > 0 {
+			heap.Push(h, Hex{hex.EncodeToString(sb[0]), stack, 1})
+		}
+	}
+
+	// Iterate over heap
+	for h.Len() > 0 {
+		hi := heap.Pop(h).(Hex)
 
 		tag := new(big.Int)
-		tag.SetBytes(k)
+		tag.SetString(hi.hex, 16)
 
-		if i > 0 {
+		if tagprev != nil {
 			diff := new(big.Int)
 			diff.Sub(tag, tagprev)
 			//fmt.Println(k, diff)
@@ -219,41 +276,43 @@ func testQuality(t *testing.T, key [32]byte, shift uint, algo string) {
 		}
 
 		tagprev = tag
+
+		if hi.index < len(keys[hi.stack]) { // Push new entry when still available
+			heap.Push(h, Hex{hex.EncodeToString(keys[hi.stack][hi.index]), hi.stack, hi.index + 1})
+		}
 	}
 
 	elapsed := time.Since(start)
 	fmt.Println(smallest)
-	fmt.Printf("Permutations: %d -- equal bits: %d -- duration: %v (%s)\n", len(keys), 8*len(keys[0])-len(smallest.Text(2)), elapsed, algo)
+	fmt.Printf("Permutations: %d -- equal bits: %d -- duration: %v (%s)\n", len(keys[0]), 8*len(keys[0][0])-len(smallest.Text(2)), elapsed, algo)
 }
 
-//=== RUN   TestQuality
-//331034981035233774730398058047
-//Permutations: 9216 -- equal bits: 29 -- duration: 13.718325ms (siphash)
-//1043651600146334132881589652279
-//Permutations: 18432 -- equal bits: 28 -- duration: 31.708039ms (siphash)
-//127091151576048986638674949881
-//Permutations: 36864 -- equal bits: 31 -- duration: 78.110429ms (siphash)
-//125739615007539857451722109740
-//Permutations: 73728 -- equal bits: 31 -- duration: 199.136706ms (siphash)
-//15892901921100966822695488796
-//Permutations: 147456 -- equal bits: 34 -- duration: 589.595038ms (siphash)
-//5323166014989392816270161037
-//Permutations: 294912 -- equal bits: 35 -- duration: 1.708350134s (siphash)
-//--- PASS: TestQuality (2.62s)
+// An HexHeap is a min-heap of hexadecimals.
+type HexHeap []Hex
 
-//331034981035233774730398058047
-//Permutations: 9216 -- equal bits: 29 -- duration: 7.942226ms (siphash)
-//1043651600146334132881589652279
-//Permutations: 18432 -- equal bits: 28 -- duration: 17.967404ms (siphash)
-//127091151576048986638674949881
-//Permutations: 36864 -- equal bits: 31 -- duration: 50.091519ms (siphash)
-//125739615007539857451722109740
-//Permutations: 73728 -- equal bits: 31 -- duration: 152.070935ms (siphash)
-//15892901921100966822695488796
-//Permutations: 147456 -- equal bits: 34 -- duration: 476.633518ms (siphash)
-//5323166014989392816270161037
-//Permutations: 294912 -- equal bits: 35 -- duration: 1.666091636s (siphash)
+type Hex struct {
+	hex   string
+	stack int
+	index int
+}
 
+func (h HexHeap) Len() int           { return len(h) }
+func (h HexHeap) Less(i, j int) bool { return h[i].hex < h[j].hex }
+func (h HexHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *HexHeap) Push(x interface{}) {
+	*h = append(*h, x.(Hex))
+}
+
+func (h *HexHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+// Slice of sorted bytes
 type sortBytes [][]byte
 
 func (s sortBytes) Less(i, j int) bool {
@@ -279,50 +338,18 @@ func TestQuality(t *testing.T) {
 
 	var key [32]byte
 	for i := range key {
-		key[i] = byte(255-i) // byte(rand.Intn(256)) //
+		key[i] = byte(255 - i) // byte(rand.Intn(256))
 	}
 
 	algo := ""
 	//algo = "blake2b"
 	//algo = "poly1305"
 	algo = "siphash"
-	for shift := uint(8); shift < 14; shift++ {
+	for shift := uint(8); shift < 16; shift++ {
 
 		testQuality(t, key, shift, algo)
 	}
 }
-
-// XOR single bit
-// Permutations:     512  (5) -- equal bits: 17
-// Permutations:    1024  (6) -- equal bits: 19
-// Permutations:    2048  (7) -- equal bits: 22
-// Permutations:    4096  (8) -- equal bits: 23
-// Permutations:    8192  (9) -- equal bits: 26
-// Permutations:   16384 (10) -- equal bits: 29
-// Permutations:   32768 (11) -- equal bits: 29
-// Permutations:   65536 (12) -- equal bits: 30
-// Permutations:  131072 (13) -- equal bits: 34
-// Permutations:  262144 (14) -- equal bits: 36
-// Permutations:  524288 (15) -- equal bits: 37
-// Permutations: 1048576 (16) -- equal bits: 38
-// Permutations: 2097152 (17) -- equal bits: 42
-
-// XOR multiple bits
-// Permutations:     288  (2) -- equal bits: 23
-// Permutations:     576  (3) -- equal bits: 20
-// Permutations:    1152  (4) -- equal bits: 25
-// Permutations:    2304  (5) -- equal bits: 20
-// Permutations:    4608  (6) -- equal bits: 22
-// Permutations:    9216  (7) -- equal bits: 28
-// Permutations:   18432  (8) -- equal bits: 31
-// Permutations:   36864  (9) -- equal bits: 31
-// Permutations:   73728 (10) -- equal bits: 33
-// Permutations:  147456 (11) -- equal bits: 33
-// Permutations:  294912 (12) -- equal bits: 38
-// Permutations:  589824 (13) -- equal bits: 40
-// Permutations: 1179648 (14) -- equal bits: 40
-// Permutations: 2359296 (15) -- equal bits: 41
-// Permutations: 4718592 (16) -- equal bits: 45
 
 // Benchmarks
 
